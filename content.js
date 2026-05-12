@@ -35,84 +35,149 @@ function finalScraper() {
             window.lastCount = count;
             console.log(`%c[!] NOTIFICATION: ${count}`, "background:#e11d48;color:white;padding:2px 6px;font-weight:bold;");
             msgLink.click();
-            setTimeout(processUnreadChats, 3000);
+            // Wait for messaging page to load, then collect names and process
+            setTimeout(collectAndProcess, 3000);
         }
     }
 }
 
-function processUnreadChats() {
+// === STEP 1: Collect ALL unread chat NAMES first (before LinkedIn clears indicators) ===
+function collectAndProcess() {
     if (isProcessing) return;
     isProcessing = true;
 
-    // Find ALL conversation cards in the list
     const allCards = document.querySelectorAll('.msg-conversation-card__content--selectable');
-    const unreadQueue = [];
+    const unreadNames = [];
 
     allCards.forEach(card => {
-        // --- UNREAD DETECTION using exact LinkedIn classes ---
-        // 1. Snippet has "msg-conversation-card__message-snippet--unread" class
         const hasUnreadSnippet = card.querySelector('.msg-conversation-card__message-snippet--unread') !== null;
-        // 2. Unread count badge exists
         const hasUnreadBadge = card.querySelector('.msg-conversation-card__unread-count') !== null;
-        // 3. Name h3 has t-bold (unread = bold, read = t-normal)
         const nameEl = card.querySelector('h3.msg-conversation-card__participant-names');
         const isBoldName = nameEl?.classList?.contains('t-bold');
 
         if (hasUnreadSnippet || hasUnreadBadge || isBoldName) {
-            const name = nameEl?.innerText?.trim() || "Unknown";
-            const snippet = card.querySelector('.msg-conversation-card__message-snippet')?.innerText?.trim() || "";
-
-            // Skip if already replied to this person in this session
-            if (repliedChats.has(name)) return;
-
-            unreadQueue.push({ element: card, name, snippet });
-            console.log(`%c[FOUND] Unread chat: ${name} — "${snippet}"`, "background:#f59e0b;color:black;padding:2px 6px;");
+            const name = nameEl?.innerText?.trim() || "";
+            if (name && !repliedChats.has(name) && !unreadNames.includes(name)) {
+                unreadNames.push(name);
+                console.log(`%c[FOUND] Unread: ${name}`, "background:#f59e0b;color:black;padding:2px 6px;");
+            }
         }
     });
 
-    if (unreadQueue.length === 0) {
+    if (unreadNames.length === 0) {
         console.log("%c[INFO] No unread chats to reply.", "background:#6b7280;color:white;padding:2px 6px;");
         isProcessing = false;
         return;
     }
 
-    console.log(`%c[QUEUE] ${unreadQueue.length} unread chat(s) to process`, "background:#8b5cf6;color:white;padding:2px 6px;font-weight:bold;");
+    console.log(`%c[QUEUE] ${unreadNames.length} unread chat(s) to process: ${unreadNames.join(', ')}`, "background:#8b5cf6;color:white;padding:2px 6px;font-weight:bold;");
 
-    // Process them one by one (sequential)
-    processNextChat(unreadQueue, 0);
+    // Start processing by name, one by one
+    processByName(unreadNames, 0);
 }
 
-function processNextChat(queue, index) {
-    if (index >= queue.length) {
-        console.log("%c[DONE] All unread chats processed!", "background:#059669;color:white;padding:2px 6px;font-weight:bold;");
+// === STEP 2: Find card by NAME (fresh DOM lookup each time), click it, reply ===
+function processByName(names, index) {
+    if (index >= names.length) {
+        console.log(`%c[DONE] All ${names.length} unread chats replied! Refreshing page...`, "background:#059669;color:white;padding:2px 6px;font-weight:bold;");
         isProcessing = false;
-        window.lastCount = null; // Reset so it re-checks on next interval
+        window.lastCount = null;
+
+        // Refresh page after all replies sent
+        setTimeout(() => {
+            console.log("%c[REFRESH] Reloading page...", "background:#2563eb;color:white;padding:2px 6px;font-weight:bold;");
+            window.location.reload();
+        }, 3000);
         return;
     }
 
-    const chat = queue[index];
-    console.log(`%c[PROCESSING ${index + 1}/${queue.length}] ${chat.name}`, "background:#f59e0b;color:black;padding:2px 6px;font-weight:bold;");
-    console.log(`💬 Msg: ${chat.snippet}`);
+    const targetName = names[index];
+    console.log(`%c[PROCESSING ${index + 1}/${names.length}] ${targetName}`, "background:#f59e0b;color:black;padding:2px 6px;font-weight:bold;");
 
-    // Click on the conversation card to open it
-    chat.element.click();
+    // Fresh DOM search: find the conversation card by matching the name text
+    const card = findCardByName(targetName);
 
-    // Wait for chat to load, then send reply
-    setTimeout(() => {
-        sendAutoReply("Hello, thanks for reaching out. I'm currently away, will get back to you soon!", (success) => {
-            if (success) {
-                repliedChats.add(chat.name);
-                console.log(`%c[REPLIED ${index + 1}/${queue.length}] ${chat.name} ✅`, "background:#059669;color:white;padding:2px 6px;font-weight:bold;");
-            } else {
-                console.log(`%c[FAILED ${index + 1}/${queue.length}] ${chat.name} ❌`, "background:#dc2626;color:white;padding:2px 6px;font-weight:bold;");
-            }
-            // Move to next chat after delay
-            setTimeout(() => processNextChat(queue, index + 1), 2000);
-        });
-    }, 2500);
+    if (!card) {
+        console.log(`⚠️ Card not found for "${targetName}". Skipping...`);
+        repliedChats.add(targetName);
+        setTimeout(() => processByName(names, index + 1), 1000);
+        return;
+    }
+
+    // Click the card to open the conversation
+    card.click();
+
+    // Wait for input box to appear (chat loaded)
+    waitForElement('.msg-form__contenteditable[role="textbox"]', 5000, (inputBox) => {
+        if (!inputBox) {
+            console.log(`❌ Input box not found for ${targetName}. Skipping...`);
+            repliedChats.add(targetName);
+            setTimeout(() => processByName(names, index + 1), 2000);
+            return;
+        }
+
+        // Let LinkedIn fully settle
+        setTimeout(() => {
+            sendAutoReply("Hello, thanks for reaching out. I'm currently away, will get back to you soon!", (success) => {
+                repliedChats.add(targetName);
+                if (success) {
+                    console.log(`%c[REPLIED ${index + 1}/${names.length}] ${targetName} ✅`, "background:#059669;color:white;padding:2px 6px;font-weight:bold;");
+                } else {
+                    console.log(`%c[FAILED ${index + 1}/${names.length}] ${targetName} ❌`, "background:#dc2626;color:white;padding:2px 6px;font-weight:bold;");
+                }
+
+                // Wait for LinkedIn to update, then process next name
+                setTimeout(() => processByName(names, index + 1), 3000);
+            });
+        }, 1500);
+    });
 }
 
-// Auto-Reply Logic
+// === HELPER: Find conversation card by matching name text ===
+function findCardByName(targetName) {
+    const allCards = document.querySelectorAll('.msg-conversation-card__content--selectable');
+    
+    for (let i = 0; i < allCards.length; i++) {
+        const nameEl = allCards[i].querySelector('h3.msg-conversation-card__participant-names');
+        const name = nameEl?.innerText?.trim() || "";
+        
+        if (name === targetName) {
+            return allCards[i];
+        }
+    }
+
+    // Fallback: partial match (in case of extra spaces or slight differences)
+    for (let i = 0; i < allCards.length; i++) {
+        const nameEl = allCards[i].querySelector('h3.msg-conversation-card__participant-names');
+        const name = nameEl?.innerText?.trim() || "";
+        
+        if (name.includes(targetName) || targetName.includes(name)) {
+            return allCards[i];
+        }
+    }
+
+    return null;
+}
+
+// === HELPER: Wait for element to appear in DOM ===
+function waitForElement(selector, timeout, callback) {
+    const startTime = Date.now();
+
+    function check() {
+        const el = document.querySelector(selector);
+        if (el) {
+            callback(el);
+        } else if (Date.now() - startTime < timeout) {
+            setTimeout(check, 300);
+        } else {
+            callback(null);
+        }
+    }
+
+    check();
+}
+
+// === AUTO-REPLY LOGIC ===
 function sendAutoReply(replyText, callback) {
     const inputBox = document.querySelector('.msg-form__contenteditable[role="textbox"]');
     if (!inputBox) {
@@ -121,37 +186,57 @@ function sendAutoReply(replyText, callback) {
         return;
     }
 
+    // Clear, focus, and type
     inputBox.focus();
     inputBox.innerHTML = `<p>${replyText}</p>`;
     inputBox.dispatchEvent(new Event('input', { bubbles: true }));
 
-    setTimeout(() => {
-        const sendBtn = document.querySelector('.msg-form__send-button');
-        if (sendBtn && !sendBtn.disabled) {
+    // Wait for send button to become enabled
+    waitForSendButton(3000, (sendBtn) => {
+        if (sendBtn) {
             sendBtn.click();
             console.log("%c[SENT] Reply Delivered", "background:#3b82f6;color:white;padding:2px 6px;");
-            if (callback) setTimeout(() => callback(true), 1000);
+            if (callback) setTimeout(() => callback(true), 1500);
         } else {
-            // Retry once — sometimes LinkedIn needs a moment to enable the button
-            console.log("⚠️ Send button disabled. Retrying...");
+            // Retry: re-type and try again
+            console.log("⚠️ Send button not enabled. Retrying...");
+            inputBox.focus();
+            inputBox.innerHTML = "";
             setTimeout(() => {
-                inputBox.focus();
                 inputBox.innerHTML = `<p>${replyText}</p>`;
                 inputBox.dispatchEvent(new Event('input', { bubbles: true }));
-                setTimeout(() => {
-                    const retryBtn = document.querySelector('.msg-form__send-button');
-                    if (retryBtn && !retryBtn.disabled) {
+                
+                waitForSendButton(3000, (retryBtn) => {
+                    if (retryBtn) {
                         retryBtn.click();
                         console.log("%c[SENT] Reply Delivered (retry)", "background:#3b82f6;color:white;padding:2px 6px;");
-                        if (callback) setTimeout(() => callback(true), 1000);
+                        if (callback) setTimeout(() => callback(true), 1500);
                     } else {
-                        console.log("❌ Send button still disabled.");
+                        console.log("❌ Send button still disabled after retry.");
                         if (callback) callback(false);
                     }
-                }, 1000);
+                });
             }, 500);
         }
-    }, 1000);
+    });
+}
+
+// === HELPER: Wait for send button to become enabled ===
+function waitForSendButton(timeout, callback) {
+    const startTime = Date.now();
+
+    function check() {
+        const btn = document.querySelector('.msg-form__send-button');
+        if (btn && !btn.disabled) {
+            callback(btn);
+        } else if (Date.now() - startTime < timeout) {
+            setTimeout(check, 300);
+        } else {
+            callback(null);
+        }
+    }
+
+    check();
 }
 
 setInterval(finalScraper, 3000);
