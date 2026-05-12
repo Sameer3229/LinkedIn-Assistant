@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "LinkedIn Message Tracker",
+  "version": "1.0",
+  "description": "LinkedIn messages ko console mein track karne ke liye.",
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/*"],
+      "js": ["content.js"],
+      "all_frames": true
+    }
+  ]
+}
