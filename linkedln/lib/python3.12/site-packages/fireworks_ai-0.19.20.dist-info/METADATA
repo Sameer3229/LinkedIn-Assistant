@@ -1,0 +1,67 @@
+Metadata-Version: 2.1
+Name: fireworks-ai
+Version: 0.19.20
+Summary: Python client library for the Fireworks AI Platform
+Author-Email: Fireworks AI <info@fireworks.ai>
+License: MIT
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Development Status :: 3 - Alpha
+Project-URL: Homepage, https://fireworks.ai
+Requires-Python: >=3.10
+Requires-Dist: httpx
+Requires-Dist: httpx-ws
+Requires-Dist: httpx-sse
+Requires-Dist: pydantic
+Requires-Dist: Pillow
+Requires-Dist: openai
+Requires-Dist: typing_extensions
+Requires-Dist: mmh3>=4.1.0
+Requires-Dist: betterproto-fw[compiler]>=2.0.3
+Requires-Dist: asyncstdlib-fw>=3.13.2
+Requires-Dist: grpcio>=1.71.0
+Requires-Dist: protobuf==5.29.3
+Requires-Dist: rich>=14.0.0
+Requires-Dist: toml>=0.10.2
+Requires-Dist: aiohttp[speedups]>=3.12.11
+Requires-Dist: attrs==23.2.0
+Requires-Dist: googleapis-common-protos>=1.60.0
+Provides-Extra: flumina
+Requires-Dist: fastapi; extra == "flumina"
+Requires-Dist: tabulate; extra == "flumina"
+Requires-Dist: prance; extra == "flumina"
+Requires-Dist: openapi-spec-validator; extra == "flumina"
+Requires-Dist: gitignore-parser; extra == "flumina"
+Requires-Dist: safetensors; extra == "flumina"
+Requires-Dist: tqdm; extra == "flumina"
+Requires-Dist: torch; extra == "flumina"
+Provides-Extra: reward-kit
+Requires-Dist: reward-kit>=0.3.1; extra == "reward-kit"
+Description-Content-Type: text/markdown
+
+# Fireworks AI Python library
+
+[![PyPI Version](https://img.shields.io/pypi/v/fireworks-ai.svg)](https://pypi.org/project/fireworks-ai/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+[Fireworks AI](https://fireworks.ai/) is a platform for application developers
+and machine learning engineers to build, experiment, and deploy open-source models. Our
+platform is built upon the fastest and most efficient engine for deploying
+open-source models in production.
+
+To access all of our capabilities, we offer an idiomatic Python SDK that provides
+a developer-friendly experience from prototype to production.
+
+## Getting Started
+
+See [the tutorial](http://docs.fireworks.ai/tools-sdks/python-client/the-tutorial) to get started.
+
+## Installation
+
+This package requires Python 3.9 or higher.
+
+```sh
+pip install fireworks-ai
+```
