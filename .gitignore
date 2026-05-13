@@ -1,3 +1,15 @@
-__pycache__/
-.env
+# Python virtual env
 linkedln/
+
+# Python cache
+__pycache__/
+
+# Environment variables
+.env
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
