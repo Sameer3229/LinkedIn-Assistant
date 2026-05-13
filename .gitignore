@@ -1,15 +1,13 @@
-# Python virtual env
-linkedln/
-
-# Python cache
-__pycache__/
-
-# Environment variables
+# Environment Variables (Sensitive data like API keys, passwords)
 .env
 
-# VS Code
-.vscode/
+# Virtual Environment (Dependencies are in requirements.txt, no need to upload this)
+linkedln/
 
-# OS files
+# Python cache files
+__pycache__/
+*.pyc
+
+# IDE settings (Optional but recommended)
+.vscode/
 .DS_Store
-Thumbs.db
