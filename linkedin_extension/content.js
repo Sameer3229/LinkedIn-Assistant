@@ -8,12 +8,14 @@ console.error = (function (_error) {
     };
 })(console.error);
 
-// Track replied conversations to avoid duplicate replies
-const repliedChats = new Set();
+// Track the last inbound signature per conversation so only genuinely new inbound messages are answered.
+const conversationState = new Map();
 let isProcessing = false;
 let pendingApiRequests = 0;
+let messagingObserver = null;
+let scanDebounceTimer = null;
 const CHAT_API_ENDPOINTS = [
-    "http://localhost:8000/chat",
+    "https://linkedinassitantapi.hnhsofttechsolutions.com/chat",
 ];
 const MESSAGE_CARD_SELECTOR = ".msg-conversation-card__content--selectable";
 const COMPOSER_SELECTOR = ".msg-form__contenteditable[role=\"textbox\"]";
@@ -32,9 +34,18 @@ const HUMAN_SEND_DELAY_MS = [600, 1400];
 const HUMAN_REFRESH_DELAY_MS = [6000, 12000];
 const HUMAN_TYPING_DELAY_MS = [18, 45];
 const COMPOSER_FOCUS_DELAY_MS = 120;
+const COMPOSER_CHUNK_DELAY_MS = [200, 300];
+const MAX_REPLY_LENGTH = 800;
+const SHORT_REPLY_THRESHOLD = 200;
+const COMPOSER_VERIFY_DELAY_MS = [300, 500];
 const HEARTBEAT_INTERVAL_MS = 60000;
+const SCAN_DEBOUNCE_MS = 700;
+const RESCAN_SAME_BADGE_AFTER_MS = 8000;
 let lastHeartbeatAt = 0;
+let lastScanAt = 0;
 const REFRESH_IDLE_POLL_MS = 1500;
+const THREAD_READY_TIMEOUT_MS = 6000;
+const THREAD_READY_POLL_MS = 300;
 
 function logStage(stage, message) {
     console.log(`%c[${stage}] ${message}`, "background:#334155;color:white;padding:2px 6px;font-weight:bold;");
@@ -46,6 +57,17 @@ function randomBetween(min, max) {
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function queueScan(triggerSource, delayMs = SCAN_DEBOUNCE_MS) {
+    if (scanDebounceTimer) {
+        clearTimeout(scanDebounceTimer);
+    }
+
+    scanDebounceTimer = setTimeout(() => {
+        scanDebounceTimer = null;
+        finalScraper(triggerSource);
+    }, delayMs);
 }
 
 async function humanPause(rangeMs) {
@@ -96,6 +118,108 @@ function getActiveConversationName() {
     return "";
 }
 
+function getCardName(card) {
+    return cleanText(card?.querySelector('h3.msg-conversation-card__participant-names')?.innerText || "");
+}
+
+function getConversationKeyFromCard(card, fallbackName = "") {
+    const link =
+        card?.closest?.('a[href*="/messaging/thread/"]') ||
+        card?.querySelector?.('a[href*="/messaging/thread/"]') ||
+        null;
+    const href = link?.getAttribute?.('href') || "";
+    const match = href.match(/thread\/([^/?#]+)/i);
+
+    if (match?.[1]) {
+        return match[1];
+    }
+
+    return cleanText(fallbackName).toLowerCase();
+}
+
+function getActiveConversationKey(targetName = "") {
+    const activeSelectors = [
+        '.msg-conversation-card--active',
+        '[aria-current="true"]',
+        '.msg-conversation-listitem__link.active',
+    ];
+
+    for (const selector of activeSelectors) {
+        const node = document.querySelector(selector);
+        const key = getConversationKeyFromCard(node, getCardName(node));
+        if (key) return key;
+    }
+
+    const pathMatch = window.location.pathname.match(/\/messaging\/thread\/([^/]+)/i);
+    if (pathMatch?.[1]) {
+        return pathMatch[1];
+    }
+
+    return cleanText(targetName).toLowerCase();
+}
+
+function hasUnreadConversationMarkers() {
+    return Boolean(
+        document.querySelector('.msg-conversation-card__message-snippet--unread') ||
+        document.querySelector('.msg-conversation-card__unread-count') ||
+        document.querySelector('h3.msg-conversation-card__participant-names.t-bold')
+    );
+}
+
+function looksLikeMessagingMutation(mutation) {
+    const target = mutation.target;
+    if (!(target instanceof Element)) return false;
+
+    const relevantSelectors = [
+        '.msg-conversation-card__message-snippet--unread',
+        '.msg-conversation-card__unread-count',
+        '.msg-s-event-listitem',
+        '.msg-s-message-group',
+        '.notification-badge--show',
+        '.msg-conversation-card__content--selectable',
+    ];
+
+    if (relevantSelectors.some((selector) => target.matches?.(selector) || target.closest?.(selector))) {
+        return true;
+    }
+
+    for (const node of mutation.addedNodes || []) {
+        if (!(node instanceof Element)) continue;
+        if (relevantSelectors.some((selector) => node.matches?.(selector) || node.querySelector?.(selector))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function ensureMessagingObserver() {
+    if (messagingObserver) return;
+
+    const root = document.body;
+    if (!root) return;
+
+    messagingObserver = new MutationObserver((mutations) => {
+        if (isProcessing) return;
+
+        for (const mutation of mutations) {
+            if (looksLikeMessagingMutation(mutation)) {
+                queueScan("mutation", 500);
+                break;
+            }
+        }
+    });
+
+    messagingObserver.observe(root, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "aria-label"],
+    });
+
+    logStage("OBSERVE", "Messaging mutation observer enabled.");
+}
+
 function waitForActiveThread(targetName, timeout, callback) {
     const startTime = Date.now();
 
@@ -139,7 +263,7 @@ function reopenConversation(targetName, callback) {
     });
 }
 
-function finalScraper() {
+function finalScraper(triggerSource = "poll") {
     const now = Date.now();
     if (now - lastHeartbeatAt > HEARTBEAT_INTERVAL_MS) {
         lastHeartbeatAt = now;
@@ -161,12 +285,23 @@ function finalScraper() {
 
     // Only trigger if badge is visible with a count OR aria-label says there's a notification
     const hasNotification = (badge && badgeCount && badgeCount !== "0") || hasAriaNotification;
+    const onMessagingPage = window.location.pathname.includes("/messaging");
+    const badgeSignature = `${badgeCount || "?"}:${hasAriaNotification ? "aria" : "dom"}`;
+    const shouldRescanSameBadge = now - lastScanAt > RESCAN_SAME_BADGE_AFTER_MS;
+
+    if (onMessagingPage && hasUnreadConversationMarkers()) {
+        lastScanAt = now;
+        logStage("SCAN", `Unread marker trigger (${triggerSource}).`);
+        collectAndProcess(0, `inbox:${triggerSource}`);
+        return;
+    }
 
     if (hasNotification) {
         const count = badgeCount || ariaLabel.match(/(\d+)\s*new/)?.[1] || "?";
-        if (window.lastCount !== count) {
-            window.lastCount = count;
-            logStage("SCAN", `Notification detected: ${count}`);
+        if (window.lastCount !== badgeSignature || shouldRescanSameBadge) {
+            window.lastCount = badgeSignature;
+            lastScanAt = now;
+            logStage("SCAN", `Notification detected: ${count} (${triggerSource})`);
             msgLink.click();
             waitForInboxReady(10000, (ready) => {
                 if (!ready) {
@@ -176,7 +311,7 @@ function finalScraper() {
                 }
 
                 logStage("SCAN", "Messaging inbox is ready; collecting unread chats.");
-                collectAndProcess();
+                collectAndProcess(0, `badge:${triggerSource}`);
             });
         }
     }
@@ -187,8 +322,10 @@ function scheduleRefreshAfterIdle() {
 
     function check() {
         if (pendingApiRequests === 0) {
-            logStage("REFRESH", "Reloading page...");
-            window.location.reload();
+            logStage("REFRESH", "Idle state reached; scheduling next scan.");
+            isProcessing = false;
+            window.lastCount = null;
+            queueScan("idle", 1500);
             return;
         }
 
@@ -204,12 +341,12 @@ function scheduleRefreshAfterIdle() {
 }
 
 // === STEP 1: Collect ALL unread chat NAMES first (before LinkedIn clears indicators) ===
-function collectAndProcess(retryCount = 0) {
+function collectAndProcess(retryCount = 0, triggerSource = "direct") {
     if (isProcessing && retryCount === 0) return;
     if (!isProcessing) isProcessing = true;
 
     const allCards = document.querySelectorAll(MESSAGE_CARD_SELECTOR);
-    const unreadNames = [];
+    const unreadConversations = [];
 
     allCards.forEach(card => {
         const hasUnreadSnippet = card.querySelector('.msg-conversation-card__message-snippet--unread') !== null;
@@ -219,60 +356,64 @@ function collectAndProcess(retryCount = 0) {
 
         if (hasUnreadSnippet || hasUnreadBadge || isBoldName) {
             const name = nameEl?.innerText?.trim() || "";
-            if (name && !repliedChats.has(name) && !unreadNames.includes(name)) {
-                unreadNames.push(name);
-                console.log(`%c[FOUND] Unread: ${name}`, "background:#f59e0b;color:black;padding:2px 6px;");
+            const key = getConversationKeyFromCard(card, name);
+            const exists = unreadConversations.some((conversation) => conversation.key === key);
+
+            if (name && key && !exists) {
+                unreadConversations.push({ key, name });
+                console.log(`%c[FOUND] Unread: ${name} (${key})`, "background:#f59e0b;color:black;padding:2px 6px;");
             }
         }
     });
 
     if (allCards.length === 0 && retryCount < INBOX_READY_RETRY_LIMIT) {
         logStage("WAIT", `Conversation list not ready yet; retrying scan ${retryCount + 1}/${INBOX_READY_RETRY_LIMIT}`);
-        setTimeout(() => collectAndProcess(retryCount + 1), INBOX_READY_RETRY_DELAY_MS);
+        setTimeout(() => collectAndProcess(retryCount + 1, triggerSource), INBOX_READY_RETRY_DELAY_MS);
         return;
     }
 
-    if (unreadNames.length === 0) {
+    if (unreadConversations.length === 0) {
         if (retryCount < INBOX_READY_RETRY_LIMIT) {
             logStage("WAIT", `Unread markers not visible yet; rescanning ${retryCount + 1}/${INBOX_READY_RETRY_LIMIT}`);
-            setTimeout(() => collectAndProcess(retryCount + 1), INBOX_READY_RETRY_DELAY_MS);
+            setTimeout(() => collectAndProcess(retryCount + 1, triggerSource), INBOX_READY_RETRY_DELAY_MS);
             return;
         }
 
-        logStage("INFO", "No unread chats to reply.");
+        logStage("INFO", `No unread chats to reply (trigger: ${triggerSource}).`);
+        window.lastCount = null;
         isProcessing = false;
         return;
     }
 
-    logStage("QUEUE", `${unreadNames.length} unread chat(s) to process: ${unreadNames.join(', ')}`);
+    logStage("QUEUE", `${unreadConversations.length} unread chat(s) to process: ${unreadConversations.map((c) => c.name).join(', ')}`);
 
     // Start processing by name, one by one
-    processByName(unreadNames, 0);
+    processByName(unreadConversations, 0);
 }
 
 // === STEP 2: Find card by NAME (fresh DOM lookup each time), click it, reply ===
-function processByName(names, index) {
-    if (index >= names.length) {
-        logStage("DONE", `All ${names.length} unread chats processed. Refreshing page...`);
+function processByName(conversations, index) {
+    if (index >= conversations.length) {
+        logStage("DONE", `All ${conversations.length} unread chats processed.`);
         isProcessing = false;
         window.lastCount = null;
-
-        // Refresh page after all replies sent
         setTimeout(() => {
-            scheduleRefreshAfterIdle();
+            queueScan("queue-complete");
         }, randomBetween(...HUMAN_REFRESH_DELAY_MS));
         return;
     }
 
-    const targetName = names[index];
-    logStage("PROCESS", `${index + 1}/${names.length} ${targetName}`);
+    const target = conversations[index];
+    const targetName = target.name;
+    const targetKey = target.key;
+    logStage("PROCESS", `${index + 1}/${conversations.length} ${targetName} (${targetKey})`);
 
     // Fresh DOM search: find the conversation card by matching the name text
-    const card = findCardByName(targetName);
+    const card = findCardByName(targetName, targetKey);
 
     if (!card) {
         logStage("WARN", `Card not found for "${targetName}". Continuing queue without marking replied.`);
-        setTimeout(() => processByName(names, index + 1), 1000);
+        setTimeout(() => processByName(conversations, index + 1), 1000);
         return;
     }
 
@@ -285,27 +426,28 @@ function processByName(names, index) {
             reopenConversation(targetName, (reopened) => {
                 if (!reopened) {
                     logStage("WARN", `Thread did not confirm for ${targetName}. Will retry on a later scan.`);
-                    setTimeout(() => processByName(names, index + 1), 2000);
+                    setTimeout(() => processByName(conversations, index + 1), 2000);
                     return;
                 }
 
                 waitForElement(COMPOSER_SELECTOR, 8000, (inputBox) => {
                     if (!inputBox) {
                         logStage("WARN", `Input box not found after reopen for ${targetName}.`);
-                        setTimeout(() => processByName(names, index + 1), 2000);
+                        setTimeout(() => processByName(conversations, index + 1), 2000);
                         return;
                     }
 
                     setTimeout(() => {
-                        sendDynamicReply(targetName, (success) => {
-                            if (success) {
-                                repliedChats.add(targetName);
-                                logStage("SENT", `${index + 1}/${names.length} ${targetName}`);
+                        sendDynamicReply(targetName, targetKey, (result) => {
+                            if (result?.success && result?.skipped) {
+                                logStage("SKIP", `${index + 1}/${conversations.length} ${targetName} (same inbound signature)`);
+                            } else if (result?.success) {
+                                logStage("SENT", `${index + 1}/${conversations.length} ${targetName}`);
                             } else {
-                                logStage("FAILED", `${index + 1}/${names.length} ${targetName}`);
+                                logStage("FAILED", `${index + 1}/${conversations.length} ${targetName}`);
                             }
 
-                            setTimeout(() => processByName(names, index + 1), 3000);
+                            setTimeout(() => processByName(conversations, index + 1), 3000);
                         });
                     }, 1500);
                 });
@@ -317,22 +459,23 @@ function processByName(names, index) {
         waitForElement(COMPOSER_SELECTOR, 8000, (inputBox) => {
         if (!inputBox) {
             logStage("WARN", `Input box not found for ${targetName}. Will retry on a later scan.`);
-            setTimeout(() => processByName(names, index + 1), 2000);
+            setTimeout(() => processByName(conversations, index + 1), 2000);
             return;
         }
 
         // Let LinkedIn fully settle
         setTimeout(() => {
-            sendDynamicReply(targetName, (success) => {
-                if (success) {
-                    repliedChats.add(targetName);
-                    logStage("SENT", `${index + 1}/${names.length} ${targetName}`);
+            sendDynamicReply(targetName, targetKey, (result) => {
+                if (result?.success && result?.skipped) {
+                    logStage("SKIP", `${index + 1}/${conversations.length} ${targetName} (same inbound signature)`);
+                } else if (result?.success) {
+                    logStage("SENT", `${index + 1}/${conversations.length} ${targetName}`);
                 } else {
-                    logStage("FAILED", `${index + 1}/${names.length} ${targetName}`);
+                    logStage("FAILED", `${index + 1}/${conversations.length} ${targetName}`);
                 }
 
                 // Wait for LinkedIn to update, then process next name
-                setTimeout(() => processByName(names, index + 1), 3000);
+                setTimeout(() => processByName(conversations, index + 1), 3000);
             });
         }, 1500);
     });
@@ -340,8 +483,17 @@ function processByName(names, index) {
 }
 
 // === HELPER: Find conversation card by matching name text ===
-function findCardByName(targetName) {
+function findCardByName(targetName, targetKey = "") {
     const allCards = document.querySelectorAll('.msg-conversation-card__content--selectable');
+
+    if (targetKey) {
+        for (let i = 0; i < allCards.length; i++) {
+            const key = getConversationKeyFromCard(allCards[i], getCardName(allCards[i]));
+            if (key === targetKey) {
+                return allCards[i];
+            }
+        }
+    }
     
     for (let i = 0; i < allCards.length; i++) {
         const nameEl = allCards[i].querySelector('h3.msg-conversation-card__participant-names');
@@ -435,55 +587,137 @@ function formatReplyText(text) {
     return escapeHtml(text).replace(/\n/g, "<br>");
 }
 
-function extractConversationContext() {
-    const candidateRoots = [
-        document.querySelector('.msg-s-message-list'),
-        document.querySelector('.msg-s-message-list-content'),
-        document.querySelector('[class*="msg-s-message-list"]'),
-    ].filter(Boolean);
+function getMessageListRoot() {
+    return (
+        document.querySelector('.msg-s-message-list') ||
+        document.querySelector('.msg-s-message-list-content') ||
+        document.querySelector('[data-test-id="message-list"]') ||
+        document.querySelector('[class*="msg-s-message-list"]') ||
+        document.querySelector('.msg-thread') ||
+        null
+    );
+}
 
-    for (const root of candidateRoots) {
-        const messages = [];
-        const messageSelectors = [
-            '.msg-s-message-group__message-text',
-            '.msg-s-message-list__event',
-            '.msg-s-event-listitem__body',
-            '.msg-s-message-list__event p',
-            '.msg-s-message-list__event span',
-        ];
+function waitForThreadContentReady(timeout, callback) {
+    const startTime = Date.now();
 
-        for (const selector of messageSelectors) {
-            const messageNodes = root.querySelectorAll(selector);
-            messageNodes.forEach((node) => {
-                const messageText = cleanText(node.innerText || node.textContent);
-                if (messageText && !messages.includes(messageText)) {
-                    messages.push(messageText);
-                }
-            });
-        }
+    function check() {
+        const root = getMessageListRoot();
+        const rootText = cleanText(root?.innerText || root?.textContent);
 
-        if (messages.length > 0) {
-            return messages.slice(-3).join("\n\n");
-        }
-
-        const fallbackText = cleanText(root.innerText || root.textContent);
-        if (fallbackText) {
-            return fallbackText.slice(-800);
+        if (root && rootText.length > 0) {
+            callback(true);
+        } else if (Date.now() - startTime < timeout) {
+            setTimeout(check, THREAD_READY_POLL_MS);
+        } else {
+            callback(false);
         }
     }
 
-    return "";
+    check();
+}
+
+function extractConversationData() {
+    const root = getMessageListRoot();
+    if (!root) return { messages: [], latestInbound: "", debugStats: {} };
+
+    const messages = [];
+    const inboundMessages = [];
+    const debugStats = {};
+    const messageSelectors = [
+        '.msg-s-event-listitem__body',
+        '.msg-s-message-group__message-text',
+        '[data-test-id="message-content"]',
+        '[data-test-id="message-bubble"]',
+        '.msg-s-event-listitem__message-bubble',
+        '.msg-s-message-group__message-text span',
+    ];
+
+    const timestampPatterns = [
+        /\b\d{1,2}:\d{2}\b/i,
+        /\b(today|yesterday)\b/i,
+        /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i,
+    ];
+
+    function isTimestampText(text) {
+        return timestampPatterns.some((pattern) => pattern.test(text));
+    }
+
+    function isInboundNode(node) {
+        const wrapper = node?.closest?.('.msg-s-message-group, .msg-s-event-listitem, .msg-s-message-list__event');
+        if (!wrapper) return true;
+
+        const classList = wrapper.className || "";
+        if (classList.includes('msg-s-message-group--me')) return false;
+        if (classList.includes('msg-s-message-group--self')) return false;
+        if (classList.includes('msg-s-event-listitem--self')) return false;
+        if (classList.includes('msg-s-event-listitem--me')) return false;
+
+        return true;
+    }
+
+    function pushMessage(node) {
+        if (node?.getAttribute?.("aria-hidden") === "true") return;
+
+        const trimmed = cleanText(node.innerText || node.textContent);
+        if (!trimmed || trimmed.length < 2) return;
+        if (isTimestampText(trimmed)) return;
+
+        if (!messages.includes(trimmed)) messages.push(trimmed);
+        if (isInboundNode(node) && !inboundMessages.includes(trimmed)) inboundMessages.push(trimmed);
+    }
+
+    for (const selector of messageSelectors) {
+        const messageNodes = root.querySelectorAll(selector);
+        debugStats[selector] = messageNodes.length;
+        messageNodes.forEach((node) => pushMessage(node));
+    }
+
+    if (messages.length === 0) {
+        const globalNodes = document.querySelectorAll('.msg-s-event-listitem__body, .msg-s-message-group__message-text');
+        debugStats["__global__"] = globalNodes.length;
+        globalNodes.forEach((node) => pushMessage(node));
+    }
+
+    const latestInbound = inboundMessages.length > 0 ? inboundMessages[inboundMessages.length - 1] : "";
+    return { messages, latestInbound, debugStats };
+}
+
+function getFirstName(name) {
+    const cleaned = cleanText(name);
+    if (!cleaned) return "there";
+    return cleaned.split(/\s+/)[0];
+}
+
+function buildInboundSignature(latestInbound, messages) {
+    const normalizedInbound = cleanText(latestInbound).toLowerCase();
+    const contextTail = messages
+        .slice(-2)
+        .map((msg) => cleanText(msg).toLowerCase())
+        .join("||");
+
+    return cleanText(`${normalizedInbound}::${contextTail}`);
 }
 
 function buildReplyPrompt(targetName) {
-    const conversationContext = extractConversationContext();
+    const { messages, latestInbound } = extractConversationData();
+    const firstName = getFirstName(targetName);
     const promptParts = [
-        `Write a short, professional LinkedIn reply to ${targetName}.`,
-        "Keep it natural, concise, and directly relevant to the latest message.",
+        "Write a short, professional LinkedIn DM reply.",
+        `Recipient name: ${targetName}`,
+        `Recipient first name: ${firstName}`,
+        "Rules: 1-2 short sentences, natural tone, directly answer the latest inbound message, no bullet points, no templates.",
+        "Never use placeholders like [Name], [Company], [your role], [industry], or bracket variables.",
     ];
 
-    if (conversationContext) {
-        promptParts.push(`Latest thread context:\n${conversationContext}`);
+    if (latestInbound) {
+        promptParts.push(`Latest inbound message:\n${latestInbound}`);
+    }
+
+    if (messages.length > 0) {
+        promptParts.push(`Latest thread context:\n${messages.slice(-3).join("\n\n")}`);
+    } else {
+        promptParts.push("If no context is available, respond with a brief request for clarification.");
     }
 
     return promptParts.join("\n\n");
@@ -554,11 +788,68 @@ async function fetchReplyFromApi(message, attempt) {
     throw lastError || new Error("Reply API request failed");
 }
 
-function sendDynamicReply(targetName, callback) {
+function sendDynamicReply(targetName, conversationKey, callback) {
     const prompt = buildReplyPrompt(targetName);
     logStage("API", `Generating reply for ${targetName}`);
 
     (async () => {
+        const ready = await new Promise((resolve) => {
+            waitForThreadContentReady(THREAD_READY_TIMEOUT_MS, resolve);
+        });
+
+        if (!ready) {
+            logStage("CONTEXT", `Thread content not ready for ${targetName}; skipping API call.`);
+            if (callback) callback(false);
+            return;
+        }
+
+        const { messages, latestInbound, debugStats } = extractConversationData();
+        if (messages.length === 0) {
+            logStage("CONTEXT", `No message nodes found for ${targetName}. Selector counts: ${JSON.stringify(debugStats)}`);
+            if (callback) callback(false);
+            return;
+        }
+
+        if (!latestInbound) {
+            logStage("CONTEXT", `No inbound message detected for ${targetName}; skipping API call.`);
+            if (callback) callback({ success: false, reason: "missing-inbound" });
+            return;
+        }
+
+        const effectiveConversationKey = cleanText(conversationKey || getActiveConversationKey(targetName));
+        const stateKey = cleanText(effectiveConversationKey || targetName).toLowerCase();
+        const inboundSignature = buildInboundSignature(latestInbound, messages);
+        const previousSignature = conversationState.get(stateKey)?.lastInboundSignature || "";
+
+        if (previousSignature && previousSignature === inboundSignature) {
+            logStage("DEDUPE", `Skipping ${targetName}; inbound signature unchanged (${stateKey}).`);
+            if (callback) callback({ success: true, skipped: true, reason: "same-inbound" });
+            return;
+        }
+
+        logStage(
+            "DEDUPE",
+            `Inbound signature changed for ${targetName} (${stateKey}): old=${previousSignature ? previousSignature.slice(0, 24) : "none"} new=${inboundSignature.slice(0, 24)}`
+        );
+
+        const composerReady = await new Promise((resolve) => {
+            waitForComposerReady(5000, resolve);
+        });
+
+        if (!composerReady) {
+            logStage("COMPOSE", `Composer not ready for ${targetName}; skipping API call.`);
+            if (callback) callback({ success: false, reason: "composer-not-ready" });
+            return;
+        }
+
+        const inputBox = document.querySelector(COMPOSER_SELECTOR);
+        const focused = await focusComposer(inputBox);
+        if (!focused) {
+            logStage("COMPOSE", `Composer focus failed for ${targetName}; skipping API call.`);
+            if (callback) callback({ success: false, reason: "focus-failed" });
+            return;
+        }
+
         let replyText = "";
 
         for (let attempt = 1; attempt <= API_RETRY_LIMIT; attempt += 1) {
@@ -569,7 +860,7 @@ function sendDynamicReply(targetName, callback) {
             } catch (error) {
                 if (attempt >= API_RETRY_LIMIT) {
                     logStage("API", `Reply generation failed for ${targetName}: ${error?.message || error}`);
-                    if (callback) callback(false);
+                    if (callback) callback({ success: false, reason: "api-failed" });
                     return;
                 }
 
@@ -581,18 +872,55 @@ function sendDynamicReply(targetName, callback) {
 
         if (!replyText) {
             logStage("API", `No reply text available for ${targetName}.`);
-            if (callback) callback(false);
+            if (callback) callback({ success: false, reason: "empty-reply" });
             return;
         }
 
         logStage("API", `Reply generated for ${targetName}`);
-        sendAutoReply(replyText, targetName, callback);
+        sendAutoReply(replyText, targetName, (success) => {
+            if (success) {
+                conversationState.set(stateKey, {
+                    lastInboundSignature: inboundSignature,
+                    lastSentAt: Date.now(),
+                });
+            }
+
+            if (callback) {
+                callback({
+                    success,
+                    skipped: false,
+                    stateKey,
+                });
+            }
+        });
     })();
 }
 
 function composerHasReply(inputBox, replyText) {
     const composerText = cleanText(inputBox?.innerText || inputBox?.textContent);
-    return composerText.includes(cleanText(replyText));
+    return replyMatchesSnippet(composerText, replyText);
+}
+
+function getReplySnippets(text) {
+    const normalized = cleanText(text);
+    if (!normalized) return { head: "", tail: "" };
+
+    const head = normalized.slice(0, 50);
+    const tail = normalized.length > 50 ? normalized.slice(-50) : normalized;
+    return { head, tail };
+}
+
+function replyMatchesSnippet(composerText, replyText) {
+    const normalizedComposer = cleanText(composerText);
+    const { head, tail } = getReplySnippets(replyText);
+
+    if (!normalizedComposer || !head) return false;
+
+    if (head && tail) {
+        return normalizedComposer.includes(head) && normalizedComposer.includes(tail);
+    }
+
+    return normalizedComposer.includes(head);
 }
 
 async function focusComposer(inputBox) {
@@ -627,54 +955,128 @@ async function tryPasteText(normalizedReply) {
     return false;
 }
 
+function chunkReplyText(text) {
+    const normalized = cleanText(text);
+    if (!normalized) return [];
+
+    const rawChunks = normalized.split(/\n\n+/).map((chunk) => chunk.trim()).filter(Boolean);
+    return rawChunks.length > 0 ? rawChunks : [normalized];
+}
+
+function clearComposer(inputBox) {
+    if (!inputBox) return;
+
+    // Select all text and delete via keyboard events — React hears this and clears its state
+    inputBox.focus();
+    document.execCommand("selectAll", false, null);
+    document.execCommand("delete", false, null);
+
+    // Fire an input event so React reconciles the empty state
+    inputBox.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+}
+
+// Core helper: insert text into a contenteditable in a way React's event system recognises.
+// Uses DataTransfer + ClipboardEvent so LinkedIn's ProseMirror/React sees a real paste
+// and updates its internal state — which is what enables the Send button.
+async function insertTextViaClipboardEvent(inputBox, text) {
+    inputBox.focus();
+
+    const dt = new DataTransfer();
+    dt.setData("text/plain", text);
+
+    const pasteEvent = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt,
+    });
+
+    inputBox.dispatchEvent(pasteEvent);
+
+    // Wait for React to reconcile
+    await delay(80);
+    const currentText = cleanText(inputBox.innerText || inputBox.textContent);
+    if (currentText.includes(cleanText(text).slice(0, 30))) return true;
+
+    // Fallback: execCommand insertText (still works in Chrome extension content scripts)
+    inputBox.focus();
+    return document.execCommand("insertText", false, text);
+}
+
 async function populateComposer(inputBox, replyText) {
-    const normalizedReply = cleanText(replyText);
+    let normalizedReply = cleanText(replyText);
 
     if (!inputBox || !normalizedReply) return false;
 
+    if (normalizedReply.length > MAX_REPLY_LENGTH) {
+        normalizedReply = `${normalizedReply.slice(0, MAX_REPLY_LENGTH)}...`;
+    }
+
     await focusComposer(inputBox);
+    clearComposer(inputBox);
+    await delay(150);
 
-    try {
-        if (typeof document.execCommand === "function") {
-            document.execCommand("selectAll", false, null);
-            document.execCommand("delete", false, null);
-            document.execCommand("insertText", false, normalizedReply);
-        }
-    } catch {
-        // Fallback below.
-    }
+    // Strategy 1: ClipboardEvent paste (preferred — React sees it and enables Send button)
+    const inserted = await insertTextViaClipboardEvent(inputBox, normalizedReply);
 
-    if (!composerHasReply(inputBox, normalizedReply)) {
+    if (!inserted) {
+        // Strategy 2: execCommand character-by-character (last resort)
         await focusComposer(inputBox);
-        const pasted = await tryPasteText(normalizedReply);
-
-        if (pasted) {
-            inputBox.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-    }
-
-    if (!composerHasReply(inputBox, normalizedReply)) {
-        await focusComposer(inputBox);
-        inputBox.innerHTML = "";
-        inputBox.dispatchEvent(new Event("input", { bubbles: true }));
+        clearComposer(inputBox);
+        await delay(100);
 
         for (const char of normalizedReply) {
-            inputBox.innerHTML += char === "\n" ? "<br>" : escapeHtml(char);
-            const inputEvent = typeof InputEvent === "function"
-                ? new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: char })
-                : new Event("input", { bubbles: true });
-            inputBox.dispatchEvent(inputEvent);
+            document.execCommand("insertText", false, char);
             await delay(randomBetween(...HUMAN_TYPING_DELAY_MS));
         }
     }
 
-    const inputEvent = typeof InputEvent === "function"
-        ? new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: normalizedReply })
-        : new Event("input", { bubbles: true });
-    inputBox.dispatchEvent(inputEvent);
-    inputBox.dispatchEvent(new Event("change", { bubbles: true }));
+    await delay(randomBetween(...COMPOSER_VERIFY_DELAY_MS));
+    return replyMatchesSnippet(inputBox?.innerText || inputBox?.textContent, normalizedReply);
+}
 
-    return composerHasReply(inputBox, normalizedReply);
+function findLatestOutgoingBubble(replyText) {
+    const root = getMessageListRoot();
+    if (!root) return null;
+
+    const outgoingSelectors = [
+        '.msg-s-message-group--me .msg-s-message-group__message-text',
+        '.msg-s-event-listitem--self .msg-s-event-listitem__body',
+        '.msg-s-message-group--me [data-test-id="message-content"]',
+    ];
+
+    const { head, tail } = getReplySnippets(replyText);
+
+    for (const selector of outgoingSelectors) {
+        const nodes = Array.from(root.querySelectorAll(selector));
+        for (const node of nodes.reverse()) {
+            const text = cleanText(node.innerText || node.textContent);
+            if (text && text.includes(head) && text.includes(tail)) {
+                return node;
+            }
+        }
+    }
+
+    return null;
+}
+
+function waitForSendConfirmation(replyText, timeout, callback) {
+    const startTime = Date.now();
+
+    function check() {
+        const inputBox = document.querySelector(COMPOSER_SELECTOR);
+        const composerText = cleanText(inputBox?.innerText || inputBox?.textContent);
+        const bubble = findLatestOutgoingBubble(replyText);
+
+        if (bubble || !composerText) {
+            callback(true);
+        } else if (Date.now() - startTime < timeout) {
+            setTimeout(check, 250);
+        } else {
+            callback(false);
+        }
+    }
+
+    check();
 }
 
 function waitForComposerToClear(replyText, timeout, callback) {
@@ -699,7 +1101,11 @@ function waitForComposerToClear(replyText, timeout, callback) {
 
 // === AUTO-REPLY LOGIC ===
 function sendAutoReply(replyText, targetName, callback) {
-    const normalizedReply = cleanText(replyText);
+    let normalizedReply = cleanText(replyText);
+
+    if (normalizedReply.length > MAX_REPLY_LENGTH) {
+        normalizedReply = `${normalizedReply.slice(0, MAX_REPLY_LENGTH)}...`;
+    }
 
     async function composeAndSend(attempt) {
         const ready = await new Promise((resolve) => {
@@ -725,6 +1131,11 @@ function sendAutoReply(replyText, targetName, callback) {
         if (!composed) {
             if (attempt < COMPOSER_RETRY_LIMIT) {
                 logStage("COMPOSE", `Composer did not retain reply text; retrying ${attempt + 1}/${COMPOSER_RETRY_LIMIT}`);
+                if (attempt < 2) {
+                    setTimeout(() => composeAndSend(attempt + 1), 500);
+                    return;
+                }
+
                 reopenConversation(targetName, (reopened) => {
                     if (!reopened) {
                         logStage("COMPOSE", `Unable to reopen thread for ${targetName}.`);
@@ -756,7 +1167,7 @@ function sendAutoReply(replyText, targetName, callback) {
                 sendBtn.click();
                 logStage("SEND", "Clicked send button.");
 
-                waitForComposerToClear(normalizedReply, SEND_CONFIRMATION_TIMEOUT_MS, (sent) => {
+                waitForSendConfirmation(normalizedReply, SEND_CONFIRMATION_TIMEOUT_MS, (sent) => {
                     if (sent) {
                         logStage("SEND", "Composer cleared after send.");
                         if (callback) setTimeout(() => callback(true), 750);
@@ -792,4 +1203,9 @@ function waitForSendButton(timeout, callback) {
     check();
 }
 
-setInterval(finalScraper, 3000);
+ensureMessagingObserver();
+finalScraper("startup");
+setInterval(() => {
+    ensureMessagingObserver();
+    finalScraper("poll");
+}, 3000);

@@ -34,18 +34,63 @@ llm = ChatFireworks(
 class ChatRequest(BaseModel):
     message: str
 
+
+def extract_section(message_text: str, section_name: str) -> str:
+    marker = f"{section_name}:"
+    if marker not in message_text:
+        return ""
+
+    tail = message_text.split(marker, 1)[-1]
+    for next_header in ["Latest thread context:", "Rules:", "Never use placeholders"]:
+        if next_header in tail:
+            tail = tail.split(next_header, 1)[0]
+            break
+
+    return tail.strip()
+
 @app.post("/chat")
 async def chat_endpoint(request: ChatRequest):
+    message_text = (request.message or "").strip()
+
+    if not message_text:
+        return {
+            "reply": "Could you share the latest message text from the thread so I can respond accurately?"
+        }
+
+    latest_inbound = extract_section(message_text, "Latest inbound message")
+    if len(latest_inbound) < 2:
+        return {
+            "reply": "Could you share the latest inbound message from the thread so I can reply accurately?"
+        }
+
     system_message = (
-        "system", 
-        "Main ek behtreen HR recruiter hun jo enterprises ko "
-        "solutions or strategies provide krta hun hiring related."
-    )
+                "system",
+                "You write LinkedIn direct-message replies."
+                "Output exactly one short reply in plain text (1-2 sentences, max 320 characters)."
+                "Personalize with the provided recipient first name and latest inbound message context."
+                "Do not use placeholders or bracket variables such as [Name], [Company], [your role], [industry]."
+                "Do not produce templates, lists, headings, or generic introductions."
+                "If context is unclear, ask one concise clarifying question."
+
+                )
+
     human_message = ("human", request.message)
     
     response = llm.invoke([system_message, human_message])
-    return {"reply": response.content}
+    reply_text = (response.content or "").strip()
+
+    if not reply_text:
+        return {
+            "reply": "Thanks for your message. Could you share a little more context so I can respond clearly?"
+        }
+
+    if "[" in reply_text and "]" in reply_text:
+        return {
+            "reply": "Thanks for your message, and great to connect. Could you share a bit more detail on what you have in mind?"
+        }
+
+    return {"reply": reply_text}
 
 if __name__ == "__main__":
     # Note: File ka naam agar main.py hai to yahan "main:app" hona chahiye
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=9011, reload=True)

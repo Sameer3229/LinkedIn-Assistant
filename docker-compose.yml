@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  fastapi-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: linkedin-msg-tracker-api
+    ports:
+      - "9011:9011"
+    environment:
+      # Load from .env file
+      FIREWORKS_API_KEY: ${FIREWORKS_API_KEY}
+      PYTHONUNBUFFERED: 1
+    env_file:
+      - .env
+    volumes:
+      # Optional: Mount current directory for development (live reload requires --reload in CMD)
+      - .:/app
+    networks:
+      - linkedin-tracker-network
+    restart: unless-stopped
+    # Uncomment below for development with hot reload
+    # command: uvicorn app:app --host 0.0.0.0 --port 9011 --reload
+
+networks:
+  linkedin-tracker-network:
+    driver: bridge
