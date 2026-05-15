@@ -65,12 +65,16 @@ async def chat_endpoint(request: ChatRequest):
         }
 
     DEFAULT_SYSTEM = (
-        "You write LinkedIn direct-message replies. "
+        "You write LinkedIn direct-message replies on behalf of the account owner. "
         "Output exactly one short reply in plain text (1-2 sentences, max 320 characters). "
-        "Personalize with the provided recipient first name and latest inbound message context. "
-        "Do not use placeholders or bracket variables such as [Name], [Company], [your role], [industry]. "
+        "Use the recipient first name naturally. "
+        "NEVER invent, assume, or mention any identity details about the sender - "
+        "no profession, no industry, no skills, no role, no company - "
+        "unless that information is explicitly given in this system prompt. "
+        "If no identity context is given, keep the reply neutral and conversational. "
+        "Do not use placeholders or bracket variables. "
         "Do not produce templates, lists, headings, or generic introductions. "
-        "If context is unclear, ask one concise clarifying question."
+        "If the inbound message is unclear, ask one short clarifying question."
     )
 
     active_system = request.system_prompt.strip() if request.system_prompt.strip() else DEFAULT_SYSTEM

@@ -82,8 +82,15 @@ async function refreshSystemPromptContext() {
     const nextVersion = cleanText(result.systemPromptVersion || "");
 
     if (promptContextLoaded && nextVersion && nextVersion !== activeSystemPromptVersion) {
-        conversationState.clear();
-        logStage("PROMPT", "System prompt changed; cleared conversation state.");
+        // Only reset inbound signatures so conversations are re-evaluated
+        // while preserving lastSentText for the self-reply guard.
+        for (const [key, state] of conversationState.entries()) {
+            conversationState.set(key, {
+                ...state,
+                lastInboundSignature: "",
+            });
+        }
+        logStage("PROMPT", "System prompt changed; reset inbound signatures (lastSentText preserved).");
     }
 
     activeSystemPrompt = nextPrompt;
@@ -1293,7 +1300,15 @@ function sendAutoReply(replyText, targetName, callback) {
                                 const card = findCardByName(targetName);
                                 if (card) {
                                     card.click();
-                                    logStage("SEND", "Clicked card to trigger LinkedIn read receipt.");
+                                    logStage("SEND", "Clicked card to trigger LinkedIn read receipt (first click).");
+                                    // Second click after a short dwell to force LinkedIn to register the read state.
+                                    setTimeout(() => {
+                                        const cardAgain = findCardByName(targetName);
+                                        if (cardAgain) {
+                                            cardAgain.click();
+                                            logStage("SEND", "Clicked card again to confirm read receipt.");
+                                        }
+                                    }, 1500);
                                 }
                             }, 1000);
                         }
