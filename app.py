@@ -33,6 +33,7 @@ llm = ChatFireworks(
 
 class ChatRequest(BaseModel):
     message: str
+    system_prompt: str = ""
 
 
 def extract_section(message_text: str, section_name: str) -> str:
@@ -63,16 +64,21 @@ async def chat_endpoint(request: ChatRequest):
             "reply": "Could you share the latest inbound message from the thread so I can reply accurately?"
         }
 
-    system_message = (
-                "system",
-                "You write LinkedIn direct-message replies."
-                "Output exactly one short reply in plain text (1-2 sentences, max 320 characters)."
-                "Personalize with the provided recipient first name and latest inbound message context."
-                "Do not use placeholders or bracket variables such as [Name], [Company], [your role], [industry]."
-                "Do not produce templates, lists, headings, or generic introductions."
-                "If context is unclear, ask one concise clarifying question."
+    DEFAULT_SYSTEM = (
+        "You write LinkedIn direct-message replies. "
+        "Output exactly one short reply in plain text (1-2 sentences, max 320 characters). "
+        "Personalize with the provided recipient first name and latest inbound message context. "
+        "Do not use placeholders or bracket variables such as [Name], [Company], [your role], [industry]. "
+        "Do not produce templates, lists, headings, or generic introductions. "
+        "If context is unclear, ask one concise clarifying question."
+    )
 
-                )
+    active_system = request.system_prompt.strip() if request.system_prompt.strip() else DEFAULT_SYSTEM
+
+    system_message = (
+        "system",
+        active_system
+    )
 
     human_message = ("human", request.message)
     

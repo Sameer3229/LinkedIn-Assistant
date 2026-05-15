@@ -7,6 +7,12 @@
   "host_permissions": [
     "https://linkedinassitantapi.hnhsofttechsolutions.com/*"
   ],
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
   "content_scripts": [
     {
       "matches": ["https://www.linkedin.com/*"],
@@ -14,4 +20,15 @@
       "all_frames": true
     }
   ]
+  ,
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    },
+    "default_title": "LinkedIn Message Tracker"
+  }
 }

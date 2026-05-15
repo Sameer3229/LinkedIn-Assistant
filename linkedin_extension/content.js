@@ -16,6 +16,7 @@ let messagingObserver = null;
 let scanDebounceTimer = null;
 const CHAT_API_ENDPOINTS = [
     "https://linkedinassitantapi.hnhsofttechsolutions.com/chat",
+    // "http://localhost:9011/chat",
 ];
 const MESSAGE_CARD_SELECTOR = ".msg-conversation-card__content--selectable";
 const COMPOSER_SELECTOR = ".msg-form__contenteditable[role=\"textbox\"]";
@@ -46,6 +47,9 @@ let lastScanAt = 0;
 const REFRESH_IDLE_POLL_MS = 1500;
 const THREAD_READY_TIMEOUT_MS = 6000;
 const THREAD_READY_POLL_MS = 300;
+let activeSystemPrompt = "";
+let activeSystemPromptVersion = "";
+let promptContextLoaded = false;
 
 function logStage(stage, message) {
     console.log(`%c[${stage}] ${message}`, "background:#334155;color:white;padding:2px 6px;font-weight:bold;");
@@ -58,6 +62,49 @@ function randomBetween(min, max) {
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+async function safeStorageGet(keys, fallback = {}) {
+    try {
+        return await chrome.storage.local.get(keys);
+    } catch (error) {
+        logStage("STORAGE", `Storage read failed: ${error?.message || error}`);
+        return fallback;
+    }
+}
+
+async function refreshSystemPromptContext() {
+    const result = await safeStorageGet(["systemPrompt", "systemPromptVersion"], {
+        systemPrompt: "",
+        systemPromptVersion: "",
+    });
+
+    const nextPrompt = cleanText(result.systemPrompt || "");
+    const nextVersion = cleanText(result.systemPromptVersion || "");
+
+    if (promptContextLoaded && nextVersion && nextVersion !== activeSystemPromptVersion) {
+        conversationState.clear();
+        logStage("PROMPT", "System prompt changed; cleared conversation state.");
+    }
+
+    activeSystemPrompt = nextPrompt;
+    activeSystemPromptVersion = nextVersion;
+    promptContextLoaded = true;
+
+    return {
+        systemPrompt: activeSystemPrompt,
+        systemPromptVersion: activeSystemPromptVersion,
+    };
+}
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local") return;
+
+    if (changes.systemPrompt || changes.systemPromptVersion) {
+        refreshSystemPromptContext().catch((error) => {
+            logStage("STORAGE", `Prompt refresh failed: ${error?.message || error}`);
+        });
+    }
+});
 
 function queueScan(triggerSource, delayMs = SCAN_DEBOUNCE_MS) {
     if (scanDebounceTimer) {
@@ -397,9 +444,12 @@ function processByName(conversations, index) {
         logStage("DONE", `All ${conversations.length} unread chats processed.`);
         isProcessing = false;
         window.lastCount = null;
+        // Wait full HUMAN_REFRESH_DELAY_MS before next scan to give LinkedIn time to clear unread markers
+        const fullDelay = randomBetween(...HUMAN_REFRESH_DELAY_MS);
+        logStage("REFRESH", `Waiting ${fullDelay}ms before next scan to let LinkedIn clear unread markers.`);
         setTimeout(() => {
             queueScan("queue-complete");
-        }, randomBetween(...HUMAN_REFRESH_DELAY_MS));
+        }, fullDelay);
         return;
     }
 
@@ -645,15 +695,51 @@ function extractConversationData() {
 
     function isInboundNode(node) {
         const wrapper = node?.closest?.('.msg-s-message-group, .msg-s-event-listitem, .msg-s-message-list__event');
-        if (!wrapper) return true;
+        if (!wrapper) return false;
 
-        const classList = wrapper.className || "";
-        if (classList.includes('msg-s-message-group--me')) return false;
-        if (classList.includes('msg-s-message-group--self')) return false;
-        if (classList.includes('msg-s-event-listitem--self')) return false;
-        if (classList.includes('msg-s-event-listitem--me')) return false;
+        const eventContainer = node?.closest?.('.msg-s-event-with-indicator')
+            || wrapper?.closest?.('.msg-s-event-with-indicator');
+        if (eventContainer) {
+            const sendingIndicator = eventContainer.querySelector('[class*="sending-indicator"]');
+            if (sendingIndicator) {
+                return false;
+            }
+        }
 
-        return true;
+        const outboundMarkers = [
+            'msg-s-message-group--me',
+            'msg-s-message-group--self',
+            'msg-s-event-listitem--self',
+            'msg-s-event-listitem--me',
+            'msg-s-message-group--outgoing',
+            'msg-s-event-listitem--outgoing',
+        ];
+
+        const inboundMarkers = [
+            'msg-s-event-listitem--other',
+            'msg-s-message-group--other',
+        ];
+
+        let current = wrapper;
+        while (current && current instanceof Element) {
+            const classList = current.classList || [];
+
+            if (outboundMarkers.some((marker) => classList.contains(marker))) {
+                return false;
+            }
+
+            if (inboundMarkers.some((marker) => classList.contains(marker))) {
+                return true;
+            }
+
+            if (current.querySelector?.('a.msg-s-event-listitem__link')) {
+                return true;
+            }
+
+            current = current.parentElement;
+        }
+
+        return false;
     }
 
     function pushMessage(node) {
@@ -691,12 +777,7 @@ function getFirstName(name) {
 
 function buildInboundSignature(latestInbound, messages) {
     const normalizedInbound = cleanText(latestInbound).toLowerCase();
-    const contextTail = messages
-        .slice(-2)
-        .map((msg) => cleanText(msg).toLowerCase())
-        .join("||");
-
-    return cleanText(`${normalizedInbound}::${contextTail}`);
+    return normalizedInbound;
 }
 
 function buildReplyPrompt(targetName) {
@@ -723,7 +804,7 @@ function buildReplyPrompt(targetName) {
     return promptParts.join("\n\n");
 }
 
-async function fetchReplyFromApi(message, attempt) {
+async function fetchReplyFromApi(message, attempt, customSystemPrompt) {
     let lastError = null;
     const requestStartedAt = Date.now();
 
@@ -740,7 +821,7 @@ async function fetchReplyFromApi(message, attempt) {
                 headers: {
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({ message }),
+                body: JSON.stringify({ message, system_prompt: customSystemPrompt || "" }),
                 signal: controller.signal,
             });
 
@@ -816,21 +897,49 @@ function sendDynamicReply(targetName, conversationKey, callback) {
             return;
         }
 
+        const existingStateEarly = conversationState.get(
+            cleanText(conversationKey || getActiveConversationKey(targetName)).toLowerCase()
+        ) || {};
+        if (
+            existingStateEarly.lastSentText &&
+            cleanText(latestInbound).toLowerCase().includes(
+                cleanText(existingStateEarly.lastSentText).toLowerCase().slice(0, 60)
+            )
+        ) {
+            logStage("DEDUPE", `Latest inbound matches our own last sent reply for ${targetName}; skipping.`);
+            if (callback) callback({ success: true, skipped: true, reason: "self-reply-guard" });
+            return;
+        }
+
         const effectiveConversationKey = cleanText(conversationKey || getActiveConversationKey(targetName));
         const stateKey = cleanText(effectiveConversationKey || targetName).toLowerCase();
+        const existingState = conversationState.get(stateKey) || {};
+
         const inboundSignature = buildInboundSignature(latestInbound, messages);
-        const previousSignature = conversationState.get(stateKey)?.lastInboundSignature || "";
+        const previousSignature = existingState.lastInboundSignature || "";
 
         if (previousSignature && previousSignature === inboundSignature) {
             logStage("DEDUPE", `Skipping ${targetName}; inbound signature unchanged (${stateKey}).`);
+            conversationState.set(stateKey, {
+                ...existingState,
+                lastInboundSignature: previousSignature,
+                lastSentAt: existingState.lastSentAt || Date.now(),
+            });
             if (callback) callback({ success: true, skipped: true, reason: "same-inbound" });
             return;
         }
 
-        logStage(
-            "DEDUPE",
-            `Inbound signature changed for ${targetName} (${stateKey}): old=${previousSignature ? previousSignature.slice(0, 24) : "none"} new=${inboundSignature.slice(0, 24)}`
-        );
+        if (!previousSignature) {
+            logStage(
+                "DEDUPE",
+                `Inbound signature for ${targetName} (${stateKey}): first time, new=${inboundSignature.slice(0, 24)}`
+            );
+        } else {
+            logStage(
+                "DEDUPE",
+                `Inbound signature changed for ${targetName} (${stateKey}): old=${previousSignature.slice(0, 24)} new=${inboundSignature.slice(0, 24)}`
+            );
+        }
 
         const composerReady = await new Promise((resolve) => {
             waitForComposerReady(5000, resolve);
@@ -851,11 +960,13 @@ function sendDynamicReply(targetName, conversationKey, callback) {
         }
 
         let replyText = "";
+                const promptContext = await refreshSystemPromptContext();
+                const storedPrompt = promptContext.systemPrompt || "";
 
         for (let attempt = 1; attempt <= API_RETRY_LIMIT; attempt += 1) {
             try {
                 await humanPause(HUMAN_REPLY_DELAY_MS);
-                replyText = await fetchReplyFromApi(prompt, attempt);
+                replyText = await fetchReplyFromApi(prompt, attempt, storedPrompt);
                 break;
             } catch (error) {
                 if (attempt >= API_RETRY_LIMIT) {
@@ -876,12 +987,17 @@ function sendDynamicReply(targetName, conversationKey, callback) {
             return;
         }
 
+        const sentReplyText = cleanText(replyText);
+
         logStage("API", `Reply generated for ${targetName}`);
         sendAutoReply(replyText, targetName, (success) => {
             if (success) {
                 conversationState.set(stateKey, {
                     lastInboundSignature: inboundSignature,
                     lastSentAt: Date.now(),
+                    lastSentText: sentReplyText,
+                    lastProcessedAt: Date.now(),
+                    skipCount: 0
                 });
             }
 
@@ -1170,7 +1286,17 @@ function sendAutoReply(replyText, targetName, callback) {
                 waitForSendConfirmation(normalizedReply, SEND_CONFIRMATION_TIMEOUT_MS, (sent) => {
                     if (sent) {
                         logStage("SEND", "Composer cleared after send.");
-                        if (callback) setTimeout(() => callback(true), 750);
+                        if (callback) {
+                            setTimeout(() => callback(true), 750);
+                            // Click card again after 1000ms to trigger LinkedIn read receipt
+                            setTimeout(() => {
+                                const card = findCardByName(targetName);
+                                if (card) {
+                                    card.click();
+                                    logStage("SEND", "Clicked card to trigger LinkedIn read receipt.");
+                                }
+                            }, 1000);
+                        }
                     } else {
                         logStage("SEND", "No confirmation after click; treating as failed send.");
                         if (callback) callback(false);
@@ -1204,6 +1330,9 @@ function waitForSendButton(timeout, callback) {
 }
 
 ensureMessagingObserver();
+refreshSystemPromptContext().catch((error) => {
+    logStage("STORAGE", `Initial prompt load failed: ${error?.message || error}`);
+});
 finalScraper("startup");
 setInterval(() => {
     ensureMessagingObserver();
