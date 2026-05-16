@@ -5,8 +5,11 @@
   "description": "LinkedIn messages ko console mein track karne ke liye.",
   "permissions": ["storage"],
   "host_permissions": [
-    "https://linkedinassitantapi.hnhsofttechsolutions.com/*"
+    "http://localhost:9011/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "icons": {
     "16": "icon16.png",
     "32": "icon32.png",

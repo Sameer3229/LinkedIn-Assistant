@@ -15,8 +15,8 @@ let pendingApiRequests = 0;
 let messagingObserver = null;
 let scanDebounceTimer = null;
 const CHAT_API_ENDPOINTS = [
-    "https://linkedinassitantapi.hnhsofttechsolutions.com/chat",
-    // "http://localhost:9011/chat",
+    // "https://linkedinassitantapi.hnhsofttechsolutions.com/chat",
+    "http://localhost:9011/chat",
 ];
 const MESSAGE_CARD_SELECTOR = ".msg-conversation-card__content--selectable";
 const COMPOSER_SELECTOR = ".msg-form__contenteditable[role=\"textbox\"]";
@@ -676,29 +676,12 @@ function waitForThreadContentReady(timeout, callback) {
 
 function extractConversationData() {
     const root = getMessageListRoot();
-    if (!root) return { messages: [], latestInbound: "", debugStats: {} };
+    if (!root) return { recentMessages: [], latestInbound: "", messages: [], debugStats: {} };
 
-    const messages = [];
+    const allMessages = [];  // Full message objects with metadata
+    const plainMessages = [];  // Plain text for backwards compatibility
     const inboundMessages = [];
     const debugStats = {};
-    const messageSelectors = [
-        '.msg-s-event-listitem__body',
-        '.msg-s-message-group__message-text',
-        '[data-test-id="message-content"]',
-        '[data-test-id="message-bubble"]',
-        '.msg-s-event-listitem__message-bubble',
-        '.msg-s-message-group__message-text span',
-    ];
-
-    const timestampPatterns = [
-        /\b\d{1,2}:\d{2}\b/i,
-        /\b(today|yesterday)\b/i,
-        /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i,
-    ];
-
-    function isTimestampText(text) {
-        return timestampPatterns.some((pattern) => pattern.test(text));
-    }
 
     function isInboundNode(node) {
         const wrapper = node?.closest?.('.msg-s-message-group, .msg-s-event-listitem, .msg-s-message-list__event');
@@ -730,50 +713,73 @@ function extractConversationData() {
         let current = wrapper;
         while (current && current instanceof Element) {
             const classList = current.classList || [];
-
-            if (outboundMarkers.some((marker) => classList.contains(marker))) {
-                return false;
-            }
-
-            if (inboundMarkers.some((marker) => classList.contains(marker))) {
-                return true;
-            }
-
-            if (current.querySelector?.('a.msg-s-event-listitem__link')) {
-                return true;
-            }
-
+            if (outboundMarkers.some((marker) => classList.contains(marker))) return false;
+            if (inboundMarkers.some((marker) => classList.contains(marker))) return true;
+            if (current.querySelector?.('a.msg-s-event-listitem__link')) return true;
             current = current.parentElement;
         }
-
         return false;
     }
 
-    function pushMessage(node) {
-        if (node?.getAttribute?.("aria-hidden") === "true") return;
+    // Get all message containers with proper metadata
+    const messageContainers = root.querySelectorAll('.msg-s-event-listitem, .msg-s-message-group');
+    
+    messageContainers.forEach((container) => {
+        // Extract text from the message body
+        const bodyNode = container.querySelector('.msg-s-event-listitem__body, .msg-s-message-group__message-text');
+        if (!bodyNode || bodyNode.getAttribute?.("aria-hidden") === "true") return;
 
-        const trimmed = cleanText(node.innerText || node.textContent);
-        if (!trimmed || trimmed.length < 2) return;
-        if (isTimestampText(trimmed)) return;
+        const messageText = cleanText(bodyNode.innerText || bodyNode.textContent);
+        if (!messageText || messageText.length < 2) return;
 
-        if (!messages.includes(trimmed)) messages.push(trimmed);
-        if (isInboundNode(node) && !inboundMessages.includes(trimmed)) inboundMessages.push(trimmed);
-    }
+        // Determine direction by checking for msg-s-event-listitem--other class
+        const listItem = container.closest('.msg-s-event-listitem');
+        const isInbound = listItem && listItem.classList.contains('msg-s-event-listitem--other');
+        
+        // Extract sender name only for inbound messages
+        let senderName = "You";
+        if (isInbound) {
+            const nameNode = container.querySelector('.msg-s-message-group__name, [data-test-id="message-name"]');
+            senderName = cleanText(nameNode?.innerText || nameNode?.textContent || "Unknown");
+            if (!senderName || senderName.length === 0) senderName = "Unknown";
+            if (!inboundMessages.includes(messageText)) inboundMessages.push(messageText);
+        }
+        
+        // Extract timestamp
+        const timeNode = container.querySelector('.msg-s-message-group__timestamp, [data-test-id="message-time"]');
+        const timestamp = cleanText(timeNode?.innerText || timeNode?.textContent || "");
 
-    for (const selector of messageSelectors) {
-        const messageNodes = root.querySelectorAll(selector);
-        debugStats[selector] = messageNodes.length;
-        messageNodes.forEach((node) => pushMessage(node));
-    }
+        // Add to plain messages for backwards compatibility
+        if (!plainMessages.includes(messageText)) plainMessages.push(messageText);
 
-    if (messages.length === 0) {
-        const globalNodes = document.querySelectorAll('.msg-s-event-listitem__body, .msg-s-message-group__message-text');
-        debugStats["__global__"] = globalNodes.length;
-        globalNodes.forEach((node) => pushMessage(node));
-    }
+        // Add structured message object
+        allMessages.push({
+            sender: senderName,
+            text: messageText,
+            direction: isInbound ? "inbound" : "outbound",
+            time: timestamp
+        });
+    });
+
+    // Get last 10 messages
+    const recentMessages = allMessages.slice(-10);
 
     const latestInbound = inboundMessages.length > 0 ? inboundMessages[inboundMessages.length - 1] : "";
-    return { messages, latestInbound, debugStats };
+    
+    // Console log the thread context with direction indicator
+    if (recentMessages.length > 0) {
+        logStage("CONTEXT", `Last ${recentMessages.length} messages in thread:`);
+        recentMessages.forEach((msg, idx) => {
+            logStage("CONTEXT", `  [${idx + 1}] [${msg.direction.toUpperCase()}] ${msg.sender} (${msg.time}): ${msg.text.slice(0, 80)}`);
+        });
+    }
+
+    return { 
+        recentMessages, 
+        latestInbound, 
+        messages: plainMessages, 
+        debugStats 
+    };
 }
 
 function getFirstName(name) {
@@ -877,7 +883,6 @@ async function fetchReplyFromApi(message, attempt, customSystemPrompt) {
 }
 
 function sendDynamicReply(targetName, conversationKey, callback) {
-    const prompt = buildReplyPrompt(targetName);
     logStage("API", `Generating reply for ${targetName}`);
 
     (async () => {
@@ -891,7 +896,7 @@ function sendDynamicReply(targetName, conversationKey, callback) {
             return;
         }
 
-        const { messages, latestInbound, debugStats } = extractConversationData();
+        const { recentMessages, messages, latestInbound, debugStats } = extractConversationData();
         if (messages.length === 0) {
             logStage("CONTEXT", `No message nodes found for ${targetName}. Selector counts: ${JSON.stringify(debugStats)}`);
             if (callback) callback(false);
@@ -966,14 +971,34 @@ function sendDynamicReply(targetName, conversationKey, callback) {
             return;
         }
 
+        // Build the thread context block from recent messages
+        const threadBlock = recentMessages.map(msg =>
+            `[${msg.direction === "outbound" ? "You" : msg.sender}]: ${msg.text}`
+        ).join('\n');
+
+        // Build the message payload with thread context
+        const firstName = getFirstName(targetName);
+        const messagePayload = `Recipient first name: ${firstName}
+
+Conversation thread (last ${recentMessages.length} messages, oldest to newest):
+${threadBlock}
+
+Latest inbound message: ${latestInbound}
+
+Rules:
+- Reply only to the latest inbound message
+- Use the thread for context but do not repeat what was already said
+- Never use placeholders like [Name] or [Company]
+- Keep reply under 320 characters`;
+
         let replyText = "";
-                const promptContext = await refreshSystemPromptContext();
-                const storedPrompt = promptContext.systemPrompt || "";
+        const promptContext = await refreshSystemPromptContext();
+        const storedPrompt = promptContext.systemPrompt || "";
 
         for (let attempt = 1; attempt <= API_RETRY_LIMIT; attempt += 1) {
             try {
                 await humanPause(HUMAN_REPLY_DELAY_MS);
-                replyText = await fetchReplyFromApi(prompt, attempt, storedPrompt);
+                replyText = await fetchReplyFromApi(messagePayload, attempt, storedPrompt);
                 break;
             } catch (error) {
                 if (attempt >= API_RETRY_LIMIT) {
@@ -1006,6 +1031,30 @@ function sendDynamicReply(targetName, conversationKey, callback) {
                     lastProcessedAt: Date.now(),
                     skipCount: 0
                 });
+
+                // Save to chat history via background script
+                try {
+                    chrome.runtime.sendMessage({
+                        type: "SAVE_CHAT_HISTORY",
+                        payload: {
+                            name: targetName,
+                            time: new Date().toLocaleString("en-US", {
+                                month: "short", day: "numeric",
+                                hour: "numeric", minute: "2-digit", hour12: true
+                            }),
+                            inbound: latestInbound ? latestInbound.slice(0, 120) : "",
+                            reply: replyText ? replyText.slice(0, 120) : ""
+                        }
+                    }, (response) => {
+                        if (chrome.runtime.lastError) {
+                            logStage("STORAGE", `History save skipped: ${chrome.runtime.lastError.message}`);
+                        } else {
+                            logStage("STORAGE", `Chat history saved for ${targetName}`);
+                        }
+                    });
+                } catch (err) {
+                    logStage("STORAGE", `History save failed: ${err.message}`);
+                }
             }
 
             if (callback) {
