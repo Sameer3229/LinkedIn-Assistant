@@ -15,8 +15,8 @@ let pendingApiRequests = 0;
 let messagingObserver = null;
 let scanDebounceTimer = null;
 const CHAT_API_ENDPOINTS = [
-    // "https://linkedinassitantapi.hnhsofttechsolutions.com/chat",
-    "http://localhost:9011/chat",
+    "https://linkedinassitantapi.hnhsofttechsolutions.com/chat",
+    // "http://localhost:9011/chat",
 ];
 const MESSAGE_CARD_SELECTOR = ".msg-conversation-card__content--selectable";
 const COMPOSER_SELECTOR = ".msg-form__contenteditable[role=\"textbox\"]";
@@ -817,9 +817,61 @@ function buildReplyPrompt(targetName) {
     return promptParts.join("\n\n");
 }
 
+// Helper: Get last 10 messages from current thread DOM
+function getLastTenMessages() {
+    const messages = [];
+    const messageContainers = document.querySelectorAll('.msg-s-event-listitem, .msg-s-message-group');
+    
+    messageContainers.forEach((container) => {
+        const bodyNode = container.querySelector('.msg-s-event-listitem__body, .msg-s-message-group__message-text');
+        if (!bodyNode || bodyNode.getAttribute?.("aria-hidden") === "true") return;
+
+        const messageText = cleanText(bodyNode.innerText || bodyNode.textContent);
+        if (!messageText || messageText.length < 2) return;
+
+        const isInbound = container.closest('.msg-s-event-listitem')?.classList.contains('msg-s-event-listitem--other');
+        const senderName = isInbound 
+            ? cleanText(container.querySelector('.msg-s-message-group__name')?.innerText || "Unknown")
+            : "You";
+
+        messages.push({
+            sender: senderName,
+            text: messageText,
+            direction: isInbound ? "inbound" : "outbound"
+        });
+    });
+
+    // Return last 10 only
+    return messages.slice(-10);
+}
+
+// Helper: Get prompt_id from chrome.storage (Manifest V3 compatible)
+function getPromptIdFromStorage() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(["selected_prompt_id"], (result) => {
+            resolve(result.selected_prompt_id ? parseInt(result.selected_prompt_id) : null);
+        });
+    });
+}
+
+// Helper: Get auth token from chrome.storage (Manifest V3 compatible)
+function getAuthTokenFromStorage() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(["auth_token"], (result) => {
+            resolve(result.auth_token || null);
+        });
+    });
+}
+
 async function fetchReplyFromApi(message, attempt, customSystemPrompt) {
     let lastError = null;
     const requestStartedAt = Date.now();
+
+    // Get prompt_id from chrome.storage (set by admin portal)
+    const promptId = await getPromptIdFromStorage();
+    
+    // Get last 10 messages from current thread
+    const recentMessages = getLastTenMessages();
 
     for (const endpoint of CHAT_API_ENDPOINTS) {
         const controller = new AbortController();
@@ -829,12 +881,27 @@ async function fetchReplyFromApi(message, attempt, customSystemPrompt) {
 
         try {
             logStage("API", `POST ${endpoint} (attempt ${attempt}/${API_RETRY_LIMIT})`);
+            
+            const requestBody = { 
+                message, 
+                system_prompt: customSystemPrompt || ""
+            };
+            
+            if (promptId) {
+                requestBody.prompt_id = promptId;
+            }
+            
+            // Include recent messages for context
+            if (recentMessages.length > 0) {
+                requestBody.recent_messages = recentMessages;
+            }
+            
             const response = await fetch(endpoint, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({ message, system_prompt: customSystemPrompt || "" }),
+                body: JSON.stringify(requestBody),
                 signal: controller.signal,
             });
 

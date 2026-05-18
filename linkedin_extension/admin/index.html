@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LinkedIn AI Assistant - Admin Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="portal-page">
+  <div class="portal-container">
+    <!-- Header -->
+    <div class="portal-header">
+      <div class="header-left">
+        <h1>LinkedIn AI Assistant</h1>
+        <p class="subtitle">Admin Dashboard</p>
+      </div>
+      <div class="header-right">
+        <span class="user-info">Logged in as: <strong id="currentUser"></strong></span>
+        <button class="btn btn-secondary" id="logoutBtn">Logout</button>
+      </div>
+    </div>
+
+    <!-- Tab Navigation -->
+    <div class="tabs-nav">
+      <button class="tab-btn active" id="tab-prompts">Prompt Manager</button>
+      <button class="tab-btn" id="tab-documents">Documents</button>
+      <button class="tab-btn" id="tab-history">Chat History</button>
+    </div>
+
+    <!-- Global Message Display -->
+    <div id="globalMessage" class="message" style="display: none;"></div>
+
+    <!-- Tab 1: Prompt Manager -->
+    <div class="tab-content active" id="panel-prompts">
+      <div class="prompts-container">
+        <div class="prompts-list">
+          <h2>Available Prompts</h2>
+          <div id="promptsList" class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Description</th>
+                  <th>Created</th>
+                  <th>Default</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="promptsTableBody">
+              </tbody>
+            </table>
+          </div>
+          <div id="emptyPromptsState" class="empty-state" style="display: none;">
+            <p>No prompts yet. Create your first prompt below.</p>
+          </div>
+        </div>
+
+        <div class="prompt-form-section">
+          <h2 id="formTitle">Add New Prompt</h2>
+          <form id="promptForm" class="form-group-vertical">
+            <div class="form-group">
+              <label for="promptName">Prompt Name *</label>
+              <input type="text" id="promptName" placeholder="e.g. Cricket Coach" required>
+            </div>
+
+            <div class="form-group">
+              <label for="promptDesc">Description</label>
+              <input type="text" id="promptDesc" placeholder="e.g. For cricket coaching inquiries" />
+            </div>
+
+            <div class="form-group">
+              <label for="promptContent">Prompt Content *</label>
+              <textarea id="promptContent" rows="8" placeholder="You are replying on behalf of... Keep it specific about your role and expertise." required></textarea>
+              <small class="form-hint">
+                Tip: Include your name, profession, and key topics you handle.
+                The AI will only use what you write here.
+              </small>
+            </div>
+
+            <div class="form-group" style="display: none;" id="editIdGroup">
+              <input type="hidden" id="editPromptId">
+            </div>
+
+            <div class="button-group">
+              <button type="button" class="btn btn-primary" id="savePromptBtn">Save Prompt</button>
+              <button type="button" class="btn btn-secondary" id="cancelEditBtn" style="display: none;">Cancel Edit</button>
+            </div>
+          </form>
+
+          <div id="promptFormError" class="error-message"></div>
+          <div id="promptFormSuccess" class="success-message" style="display: none;">Prompt saved successfully</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Documents (RAG) -->
+    <div class="tab-content" id="panel-documents">
+      <div class="documents-container">
+
+        <!-- Upload Section -->
+        <div class="upload-section">
+          <h2>Upload Documents</h2>
+          <p class="section-desc">Upload files or add a URL to build your knowledge base. The AI will use this context when replying to LinkedIn messages.</p>
+
+          <!-- File Upload -->
+          <div class="upload-card">
+            <h3>Files (.pdf, .docx, .txt)</h3>
+            <div class="upload-area" id="uploadDropZone">
+              <div class="upload-icon">&#8593;</div>
+              <p>Drag &amp; drop files here, or click to select</p>
+              <p class="upload-hint">Supports PDF, DOCX, and TXT — multiple files allowed</p>
+              <input type="file" id="docFileInput" multiple accept=".pdf,.docx,.txt" style="display:none;">
+            </div>
+            <button class="btn btn-primary" id="uploadFilesBtn" style="margin-top: 12px;">Upload Files</button>
+            <div id="uploadStatus" class="upload-status" style="display:none;"></div>
+          </div>
+
+          <!-- URL Input -->
+          <div class="upload-card" style="margin-top: 20px;">
+            <h3>Add a Web Page URL</h3>
+            <div class="form-group" style="margin-bottom: 0;">
+              <input type="url" id="docUrlInput" placeholder="https://example.com/about" style="margin-bottom: 10px;">
+            </div>
+            <button class="btn btn-primary" id="addUrlBtn">Add URL</button>
+            <div id="urlStatus" class="upload-status" style="display:none;"></div>
+          </div>
+        </div>
+
+        <!-- Documents List -->
+        <div class="documents-list">
+          <div class="documents-list-header">
+            <h2>Indexed Documents</h2>
+            <button class="btn btn-secondary" id="refreshDocsBtn">Refresh</button>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Filename / URL</th>
+                  <th>Type</th>
+                  <th>Chunks</th>
+                  <th>Added</th>
+                  <th>Context</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="documentsTableBody">
+              </tbody>
+            </table>
+          </div>
+          <div id="emptyDocsState" class="empty-state" style="display: none;">
+            <p>No documents indexed yet. Upload files or add a URL above.</p>
+          </div>
+          <div id="docsError" class="error-message" style="display:none;"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Tab 3: Chat History -->
+    <div class="tab-content" id="panel-history">
+      <div class="history-container">
+        <div class="history-header">
+          <h2>Chat History</h2>
+          <button class="btn btn-danger" id="clearHistoryBtn">Clear All History</button>
+        </div>
+
+        <div id="historList" class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Contact Name</th>
+                <th>Inbound Message</th>
+                <th>Reply Sent</th>
+              </tr>
+            </thead>
+            <tbody id="historyTableBody">
+            </tbody>
+          </table>
+        </div>
+
+        <div id="emptyHistoryState" class="empty-state" style="display: none;">
+          <p>No chat history yet. Replies will appear here when sent via the extension.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

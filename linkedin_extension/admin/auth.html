@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LinkedIn AI Assistant - Admin Login</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="auth-page">
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-header">
+        <h1>LinkedIn AI Assistant</h1>
+        <p class="auth-subtitle">Admin Portal</p>
+      </div>
+
+      <div id="loginForm" class="auth-form">
+        <h2>Login</h2>
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" placeholder="Enter your username" required>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" placeholder="Enter your password" required>
+        </div>
+        <div id="loginError" class="error-message"></div>
+        <button class="btn btn-primary" id="loginBtn">Login</button>
+      </div>
+
+      <div id="registerForm" class="auth-form" style="display: none;">
+        <h2>Create Admin Account</h2>
+        <div class="form-group">
+          <label for="regUsername">Username</label>
+          <input type="text" id="regUsername" placeholder="Choose a username" required>
+        </div>
+        <div class="form-group">
+          <label for="regPassword">Password</label>
+          <input type="password" id="regPassword" placeholder="Choose a password (min 6 chars)" required>
+        </div>
+        <div class="form-group">
+          <label for="regPasswordConfirm">Confirm Password</label>
+          <input type="password" id="regPasswordConfirm" placeholder="Confirm password" required>
+        </div>
+        <div id="registerError" class="error-message"></div>
+        <button class="btn btn-primary" id="registerBtn">Create Account</button>
+        <p class="form-toggle">
+          Already have an account? <a href="#" id="toggleFormLink">Login here</a>
+        </p>
+      </div>
+
+      <div id="noAdminMessage" class="info-box" style="display: none;">
+        <p>No admin account found. Create one to get started!</p>
+        <button class="btn btn-primary" id="createAdminBtn">Create Admin Account</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="auth.js"></script>
+</body>
+</html>
