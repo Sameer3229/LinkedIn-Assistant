@@ -1,13 +1,30 @@
-# Environment Variables (Sensitive data like API keys, passwords)
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+!.env.sample
+*.key
+*.pem
+*.p12
+*.crt
+*.cert
+*.secret
+secrets/
 
-# Virtual Environment (Dependencies are in requirements.txt, no need to upload this)
-linkedln/
+# Local databases and generated indexes
+data/admin.db
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/faiss_indexes/
 
-# Python cache files
+# Virtual environments and build artifacts
+linkedin/
+
 __pycache__/
 *.pyc
 
-# IDE settings (Optional but recommended)
+# IDE and OS files
 .vscode/
+.idea/
 .DS_Store
