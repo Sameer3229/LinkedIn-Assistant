@@ -1,4 +1,4 @@
-#!/home/hnh/Sameer/linkedin-msg-tracker/linkedln/bin/python3
+#!/home/hnh/Sameer/linkedin-msg-tracker/linkedln/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys
